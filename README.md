@@ -202,6 +202,23 @@ setDefaultOption("text-active", QString());
 setDefaultOption("text-selected", QString());
 ```
 
+`scale-factor` is applied to the height of the icon rectangle to get the glyph's em size. The glyph's
+outline is then measured and scaled down further when it does not fit the rectangle, in either
+direction, so the default of 1.0 means "as large as fits without clipping" rather than "em box equals
+the rectangle". Font Awesome icons can fill their em box exactly (fa-clock is 1.000em wide and tall) or
+overflow it (fa-gear is 1.011em by 1.062em), and drawing those at the full rectangle height shaves off
+the antialiased edge. Icons with room to spare are never enlarged; lower the value to leave a wider
+margin around every icon.
+
+Icons are rendered as filled outlines rather than as text, scaled into the rectangle less one pixel on
+every side and centred on the outline's own bounding rectangle. Drawing them as text would size the
+glyph from an integer pixel size and place it on a baseline rounded to whole pixels, and the font
+metrics that describe it (`tightBoundingRect()` included) do not match the rasterised outline closely
+enough to correct for: at icon sizes that error is about a whole pixel and it lands on one side, which
+is what clipped the edge off icons like fa-clock. Filling the outline makes both the fit and the
+centring exact at any fractional scale. Font hinting does not apply to an outline fill, which for icons
+is the intent anyway: the shape stays identical at every size and device pixel ratio.
+
 Colour options (`color`, `color-disabled`, `color-active`, `color-selected` and the pro `duotone-color*`
 variants) have no default value. When missing, `color*` resolves at paint time to
 `QApplication::palette().color(<group for the mode>, QPalette::Text)` (see `QFontAwesome::paletteColor()`), and

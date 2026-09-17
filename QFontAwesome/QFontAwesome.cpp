@@ -13,11 +13,13 @@
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QFontMetrics>
+#include <QPainterPath>
 #include <QPixmapCache>
 #include <QRegularExpression>
 #include <QSet>
 #include <QString>
 #include <QThread>
+#include <QTransform>
 #include <QUrlQuery>
 #include <QtEndian>
 
@@ -347,6 +349,13 @@ static QColor resolveDuotoneColor(const QColor& primary, QIcon::Mode mode, QIcon
     return color;
 }
 
+/// Breathing room left on every side of the glyph's ink, in pixels of the rectangle being painted.
+/// A glyph that reaches the edge loses its antialiased outline, and the font engine can snap the
+/// glyph origin vertically by a fraction of a pixel while rasterising, so a whole pixel is reserved
+/// rather than a percentage: a percentage is sub-pixel at icon sizes and disappears exactly where
+/// it is needed most.
+static constexpr qreal kInkMargin = 1.0;
+
 /// The font-awesome icon painter
 class QFontAwesomeCharIconPainter: public QFontAwesomeIconPainter
 {
@@ -387,29 +396,61 @@ public:
             anim->setup(*painter, rect);
         }
 
-        painter->setPen(color);
-        QRectF textRect(rect);
-        int flags = Qt::AlignHCenter | Qt::AlignVCenter;
+        const QRectF textRect(rect);
 
-        // ajust font size depending on the rectangle
-        int drawSize = qRound(textRect.height() * options.value(QStringLiteral("scale-factor"), 1.0).toDouble());
-        QFont ft = QFontAwesome::font(st, drawSize);
-        QFontMetricsF fm(ft);
-        QRectF tbr = fm.boundingRect(textRect, flags, text);
-        if (tbr.width() > textRect.width()) {
-            drawSize = static_cast<int>(ft.pixelSize() * qMin(textRect.width() *
-                                        0.95 / tbr.width(), textRect.height() * 0.95 / tbr.height()));
-            ft.setPixelSize(drawSize);
+        // The secondary duotone layer is a supplementary-plane character, so it needs a surrogate
+        // pair. It is a glyph of its own: it can be larger than the primary layer, and the two are
+        // designed to overlay, so they are measured together and share a single transform.
+        QString secondaryText;
+        if (isDuotoneStyle(st)) {
+            const char32_t secondaryCp = text.at(0).unicode() | QFontAwesome::DUOTONE_HEX_ICON_VALUE;
+            secondaryText = QString::fromUcs4(&secondaryCp, 1);
         }
 
-        painter->setFont(ft);
-        painter->drawText(textRect, flags, text);
+        // Draw the glyph as an outline instead of as text. Text drawing sizes the glyph from an
+        // integer pixel size and puts it on a baseline the font engine rounds to whole pixels,
+        // and the metrics that describe it - tightBoundingRect() included - do not match the
+        // rasterised outline closely enough to compensate for: at icon sizes that error is about a
+        // whole pixel, which is exactly the clipped edge. A path carries the real outline, so its
+        // bounding rectangle is the geometry that gets filled, and both the fit and the centring
+        // are exact at any fractional scale. Glyph outlines rely on non-zero winding, so the fill
+        // rule is set explicitly rather than left at QPainterPath's odd-even default.
+        const int drawSize = qRound(textRect.height() * options.value(QStringLiteral("scale-factor"), 1.0).toDouble());
+        const QFont ft = QFontAwesome::font(st, qMax(1, drawSize));
 
-        if (isDuotoneStyle(st)) {
-            // The secondary layer is a supplementary-plane character, so it needs a surrogate pair
-            const char32_t secondary = text.at(0).unicode() | QFontAwesome::DUOTONE_HEX_ICON_VALUE;
-            painter->setPen(resolveDuotoneColor(color, mode, state, options));
-            painter->drawText(textRect, flags, QString::fromUcs4(&secondary, 1));
+        QPainterPath primaryPath;
+        primaryPath.setFillRule(Qt::WindingFill);
+        primaryPath.addText(QPointF(0.0, 0.0), ft, text);
+
+        QPainterPath secondaryPath;
+        if (!secondaryText.isEmpty()) {
+            secondaryPath.setFillRule(Qt::WindingFill);
+            secondaryPath.addText(QPointF(0.0, 0.0), ft, secondaryText);
+        }
+
+        QRectF bounds = primaryPath.boundingRect();
+        if (!secondaryPath.isEmpty()) {
+            bounds |= secondaryPath.boundingRect();
+        }
+
+        if (!bounds.isEmpty()) {
+            // Scale the outline into the rectangle less kInkMargin on every side, then centre it on
+            // its own bounds. This only ever shrinks: a glyph with room to spare keeps its size.
+            const QRectF fitRect = textRect.adjusted(kInkMargin, kInkMargin, -kInkMargin, -kInkMargin);
+            const qreal scale = qMin(qMin(fitRect.width() / bounds.width(),
+                                          fitRect.height() / bounds.height()), 1.0);
+
+            QTransform transform = QTransform::fromScale(scale, scale);
+            const QRectF scaledBounds = transform.mapRect(bounds);
+            transform *= QTransform::fromTranslate(textRect.center().x() - scaledBounds.center().x(),
+                                                   textRect.center().y() - scaledBounds.center().y());
+
+            painter->fillPath(transform.map(primaryPath), color);
+
+            if (!secondaryPath.isEmpty()) {
+                painter->fillPath(transform.map(secondaryPath),
+                                  resolveDuotoneColor(color, mode, state, options));
+            }
         }
 
         painter->restore();
