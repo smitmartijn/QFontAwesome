@@ -1,0 +1,9 @@
+.*
+*.pro.user
+*.pro.user*
+CMakeLists.txt.user
+**/build
+
+# never include font files: applications supply them (local copies for the samples / generator go here)
+QFontAwesome/fonts/
+docs/
